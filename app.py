@@ -4,16 +4,33 @@ import akshare as ak
 import yfinance as yf
 from datetime import datetime, timedelta
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# ============ 页面基础配置 (移动端适配) ============
+# ============ 页面基础配置 ============
 st.set_page_config(page_title="移动量化终端", page_icon="📈", layout="centered")
 
-# 清除代理干扰
 for k in ["http_proxy", "https_proxy", "all_proxy", "no_proxy"]:
     os.environ.pop(k, None)
     os.environ.pop(k.upper(), None)
+
+# ============ 🔐 专属防盗门禁 ============
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown("<h2 style='text-align: center; margin-top: 50px;'>🔒 量化终端 Pro</h2>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pwd = st.text_input("请输入访问密码", type="password", label_visibility="collapsed")
+        if st.button("🔑 登录系统", use_container_width=True):
+            correct_pwd = st.secrets.get("APP_PASSWORD", "888888") 
+            if pwd == correct_pwd:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("❌ 密码错误！")
+    st.stop()
 
 # ============ 数据获取核心逻辑 ============
 @st.cache_data(ttl=3600)
@@ -75,21 +92,20 @@ def resample_kline(df, freq_str):
     return df_res
 
 # ============ 移动端专属 UI 界面 ============
-st.markdown("<h2 style='text-align: center;'>📱 移动端量化终端 Pro</h2>", unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center;'>📱 移动量化终端</h3>", unsafe_allow_html=True)
 
-# 使用折叠面板代替侧边栏，对手机更友好
 with st.expander("⚙️ 展开参数设置", expanded=True):
     col1, col2 = st.columns(2)
     with col1:
         source = st.selectbox("主数据源", ["东方财富 (公募基金)", "Yahoo Finance (股票)", "新浪财经 (A股)"])
         start_date = st.date_input("起始日期", value=datetime.today() - timedelta(days=730))
     with col2:
-        code = st.text_input("代码 (智能补全)", value="513100")
+        code = st.text_input("代码", value="513100")
         end_date = st.date_input("结束日期", value=datetime.today())
     
-    freq_var = st.selectbox("时间周期", ["日线 (D)", "周线 (W)", "月线 (M)", "年线 (Y)"])
+    # 【改进3】变成横向排布的按钮，一键点选
+    freq_var = st.radio("时间周期", ["日线 (D)", "周线 (W)", "月线 (M)", "年线 (Y)"], horizontal=True)
     
-    # 指数定义
     ref_options = {
         "上证指数": lambda: get_ref_close(get_yahoo, "000001.SS", "上证指数"),
         "深证成指": lambda: get_ref_close(get_yahoo, "399001.SZ", "深证成指"),
@@ -110,7 +126,6 @@ if btn_fetch:
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
-    # 智能补全
     yahoo_code, sina_code = code, code
     if len(code) == 6 and code.isdigit():
         if code.startswith(('5', '6')): 
@@ -138,54 +153,51 @@ if btn_fetch:
                 df_main[ref_name] = df_main[ref_name].ffill()
                 plot_targets.append(ref_name)
 
-        # 恢复重采样功能
         df_main = resample_kline(df_main, freq_var)
-
-        # 归一化累计收益率计算
+        
         df_plot = df_main[['日期'] + plot_targets].copy().dropna(subset=['主标的'])
         df_plot.set_index('日期', inplace=True)
-        for col in plot_targets:
-            valid = df_plot[col].dropna()
-            if not valid.empty:
-                base_val = valid.iloc[0]
-                df_plot[col] = ((df_plot[col] / base_val) - 1) * 100
 
-        # ====== 移动端优化的 Plotly 图表 (更新配色方案) ======
-        st.markdown("### 📈 累计收益率走势对比")
+        # ====== 【改进1 & 2】双 Y 轴与拖动滑块图表 ======
+        st.markdown("### 📈 绝对数值走势对比 (双Y轴)")
         
-        # 🌟 核心更新：构建专属配色地图
-        # 1. 默认色序：主标的用深蓝 (RoyalBlue)
-        color_discrete_sequence = ['RoyalBlue'] 
+        # 创建允许使用第二 Y 轴的画布
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # 2. 动态生成红色的指数色序 (如果选了多个指数，自动生成红色的渐变色序)
-        reds = px.colors.sequential.Reds_r # 使用反向红色系，让颜色深一点
-        index_colors = [reds[i * (len(reds)//(len(selected_refs)+2))] for i in range(1, len(selected_refs)+1)]
-        
-        # 3. 合并色序
-        color_discrete_sequence.extend(index_colors)
+        # 添加主标的（左边 Y 轴，深蓝色）
+        fig.add_trace(
+            go.Scatter(x=df_plot.index, y=df_plot['主标的'], name=f"{code} (左轴)",
+                       line=dict(color='RoyalBlue', width=2)),
+            secondary_y=False,
+        )
 
-        # 绘图时应用色序
-        fig = px.line(df_plot, x=df_plot.index, y=plot_targets, 
-                      labels={"value": "收益率 (%)", "variable": "指标"},
-                      color_discrete_sequence=color_discrete_sequence) # 应用自定义色序
-        
-        # 针对手机屏幕的神级优化排版
+        # 添加对比指数（右边 Y 轴，红色系）
+        reds = ['#EF5350', '#D32F2F', '#B71C1C', '#FF8A80']
+        for i, ref_name in enumerate(selected_refs):
+            fig.add_trace(
+                go.Scatter(x=df_plot.index, y=df_plot[ref_name], name=f"{ref_name} (右轴)",
+                           line=dict(color=reds[i % len(reds)], width=2)),
+                secondary_y=True,
+            )
+
+        # 布局优化
         fig.update_layout(
             hovermode="x unified",
-            margin=dict(l=10, r=10, t=20, b=10), # 极大地压缩边缘留白
-            legend=dict(
-                orientation="h", 
-                yanchor="top", y=-0.15, # 把图例放到图表正下方，不再遮挡线条
-                xanchor="center", x=0.5
-            ),
-            dragmode="pan" # 默认改为平移，适合手机触摸滑动
+            margin=dict(l=10, r=10, t=20, b=10),
+            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+            xaxis=dict(
+                rangeslider=dict(visible=True), # 【关键改进】：开启底部范围滑块，方便左右任意拖拽
+                type="date"
+            )
         )
         
-        # 隐藏碍眼的 ModeBar，允许原生双指缩放
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': True})
+        # 设置左右坐标轴的提示名字，并隐藏右轴的网格线防止画面杂乱
+        fig.update_yaxes(title_text="标的 绝对值", secondary_y=False)
+        fig.update_yaxes(title_text="指数 绝对值", showgrid=False, secondary_y=True)
 
-        # ====== 丰富的数据表格展示 ======
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+        # ====== 深度数据面板 ======
         st.markdown("### 🗄️ 深度数据面板")
-        # 将最新的日期排在最前
         df_display = df_main.sort_values('日期', ascending=False)
         st.dataframe(df_display, use_container_width=True)
